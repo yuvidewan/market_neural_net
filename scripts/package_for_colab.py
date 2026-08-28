@@ -1,23 +1,27 @@
 """
-Bundle this project for Colab, per README §2.1: "Repo comes from git, not
-from copy-paste" is the long-run goal once a GitHub remote exists, but there
-isn't one yet -- so for now this makes two zip files to upload to Google
-Drive instead. Once a remote exists, notebooks/colab_train.ipynb's git-clone
-cell can be swapped in and this script becomes unnecessary.
+Bundle this project for Colab. As of the GitHub remote
+(https://github.com/yuvidewan/market_neural_net) existing, colab_train.ipynb
+gets CODE via `git clone`/`git pull` -- the code bundle this script produces
+is now a fallback (offline use, or testing local changes before pushing),
+not the normal path. The DATA bundle is still needed every time: curated
+data is intentionally gitignored (large, regenerable, not source), so it
+still goes to Colab via a one-time Drive upload.
 
 Produces:
   experiments/colab_code_bundle.zip  -- src/, scripts/, configs/, requirements.txt,
-                                         pyproject.toml. Small, re-run this and
-                                         re-upload whenever the code changes.
+                                         pyproject.toml. Fallback only -- prefer
+                                         pushing to GitHub and letting the
+                                         notebook `git pull` instead.
   experiments/colab_data_bundle.zip  -- data/curated/ only (not raw/interim,
                                          those are much larger and not needed
                                          for training). ~300MB, upload once
                                          and only re-upload after a real
-                                         re-ingest.
+                                         re-ingest. THIS is the one you
+                                         actually need regularly.
 
 Usage:
-    python -m scripts.package_for_colab
-    python -m scripts.package_for_colab --skip-data   # code bundle only
+    python -m scripts.package_for_colab --skip-data   # normal use: just refresh the code fallback, rare
+    python -m scripts.package_for_colab                # first-time setup, or after a real data re-ingest
 """
 from __future__ import annotations
 
@@ -63,8 +67,9 @@ def main():
     else:
         print("Skipping data bundle (--skip-data)")
 
-    print(f"\nUpload both zips to Google Drive, e.g. My Drive/market_neural_net/")
-    print("then open notebooks/colab_train.ipynb in Colab and run all cells.")
+    print(f"\nUpload colab_data_bundle.zip to Google Drive at My Drive/market_neural_net/")
+    print("(code now comes from GitHub via `git pull` inside the notebook -- the code zip is")
+    print("just a fallback). Then open notebooks/colab_train.ipynb in Colab and run all cells.")
 
 
 if __name__ == "__main__":

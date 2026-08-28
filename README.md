@@ -96,9 +96,11 @@ it from day one rather than retrofitting later.
    Tier A is under 1 GB — put it in Google Drive and `drive.mount()` it, or upload to a GCS/S3
    bucket / HuggingFace dataset repo. Minute Tier B (15–30 GB) is too big for repeated Colab
    uploads: keep it on the friend's machine, or store it in a bucket and stream shards.
-4. **Repo comes from git, not from copy-paste.** Colab cell one is
-   `!git clone <repo> && pip install -e .` so the notebook holds zero logic. Notebooks are
-   launchers, never source of truth.
+4. **Repo comes from git, not from copy-paste.** ✅ Done — the project is on GitHub at
+   [github.com/yuvidewan/market_neural_net](https://github.com/yuvidewan/market_neural_net)
+   (private). `notebooks/colab_train.ipynb`'s setup cell is `git clone`/`git pull`, so the
+   notebook holds zero logic — it's a launcher, never source of truth. Data still doesn't go
+   through git (large, regenerable, gitignored) — that part still goes via Drive per rule 3.
 5. **Config-driven scale.** `configs/model/transformer_small.yaml` (CPU smoke test) and
    `transformer_full.yaml` (GPU) differ only in dims/steps, so there's one code path.
 6. **Results flow back as artifacts.** GPU machine writes checkpoint + metrics JSON + run
