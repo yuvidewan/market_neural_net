@@ -42,6 +42,16 @@ until proven innocent.
 | **Causality is enforced structurally** | Causal masks, causal normalization, purged/embargoed splits. No feature at time *t* may touch data from *t+1*. |
 | **Champion/challenger, never blind promotion** | New weights go to shadow mode first, promoted only on out-of-sample criteria. |
 
+**Scope decision (locked in): advisory before autonomous.** The end goal is still a fully
+autonomous trading agent — that doesn't change. But the near-term deliverable is a
+**recommendation engine**, not an auto-trader: for each candidate name, output what to buy,
+at what entry price, target price, stop-loss price, and quantity/position size — something a
+human reviews and acts on manually. Automation is a later, explicit graduation once the
+recommendations have earned trust on their own track record, not a default. This reorders
+Phase 7 (§4): an **advisory mode** (recommendations only, logged and scored, no order
+placement) comes before paper trading with real order simulation, which comes before live
+automated execution. See Phase 5/7 for what this changes concretely.
+
 **Scope decision (locked in):** cash equities only, for now. Futures & options are a real
 possibility later — the repo is laid out so an `data/raw/fno/` sibling and an options-specific
 encoder slot in cleanly — but nothing in Phases 0–5 requires them, and F&O brings margin,
@@ -360,6 +370,29 @@ Optimized for **risk-adjusted** outcome, not raw return.
 technically correct and useless. Always report *excess* return over buy-and-hold, and penalize
 market beta in the reward when the goal is genuine alpha.
 
+**Advisory output layer (§1 scope decision).** The policy's target weights are an internal
+representation, not what a human sees. A separate translation step turns `w_t` (and the
+model's own predictive distribution, since the quantile-regression SSL head already produces
+one — see Phase 3) into a per-name recommendation card:
+- **Entry price** — last close, or a limit price if the model's edge is conditional on getting
+  filled at a specific level (derived from the predicted return distribution, not just its mean).
+- **Target price** — set from the predicted return distribution's upper quantile over the
+  policy's intended holding horizon, not an arbitrary round-number multiple.
+- **Stop-loss price** — set from realized/predicted volatility (e.g. a multiple of predicted
+  ATR or the lower quantile), never a flat "-5%" rule — the whole point of a learned model is
+  that risk isn't the same across names and regimes.
+- **Quantity** — the position size the policy's `w_i` implies at the user's actual capital and
+  risk budget, converted to whole lots.
+- **Confidence/rationale signal** — at minimum the model's own predicted-return quantile
+  spread (tighter = more confident); full natural-language rationale is a nice-to-have, not
+  required for the advisory mode to be useful.
+
+This is a reporting layer on top of the same policy that will eventually place orders
+autonomously — building it doesn't add new modeling work, it adds a translation from `w_t`
+to something a human can act on, plus the tracking needed to score whether those
+recommendations were actually good (which becomes the trust record that later justifies
+turning automation on).
+
 ### Phase 6 — Continual learning (weeks 13–16) — *"improves with time"*
 
 The mechanism behind the requirement that it keeps learning on its own.
@@ -380,12 +413,24 @@ The mechanism behind the requirement that it keeps learning on its own.
 5. **Drift detection** — monitor rank-IC decay and feature-distribution shift (PSI). An alarm
    triggers retraining or de-risking, never silent continuation.
 
-### Phase 7 — Paper trading, then (maybe) live (weeks 16+)
+### Phase 7 — Advisory mode, then paper trading, then (maybe) live (weeks 16+)
 
+**7a. Advisory mode (comes first — this is the actual near-term goal, not a formality).**
+Every trading day, the current champion model runs inference on the live/latest data and emits
+recommendation cards (§ Phase 5's advisory output layer) — no orders placed anywhere, nothing
+automated. Logged to a simple daily report: symbol, entry, target, stop-loss, quantity, and the
+confidence signal. Critically, every recommendation is **scored against what actually
+happened** (did price reach target / stop-loss / neither, and when) so there's a real, growing
+track record before any automation conversation happens. This is the stage where you're
+looking at what it suggests and deciding whether you'd have taken the trade.
+
+**7b. Paper trading (order simulation, still no real money).**
 1. **Paper trade for at least 3 months** — broker sandbox, live feed, real timestamps. Log every
    intended order together with the model state that produced it.
 2. **Reconcile paper vs backtest.** If live paper P&L diverges materially from what the backtest
    claims for the same period, the backtest is wrong. Fix it before risking anything.
+
+**7c. Automation (opt-in graduation, not a default).**
 3. **Risk layer sits outside the network and can always override it** — per-symbol cap,
    gross/net exposure cap, daily loss limit, max-drawdown kill switch, order-rate limiter,
    fat-finger price bands, and a "flatten everything" button.
@@ -394,7 +439,8 @@ The mechanism behind the requirement that it keeps learning on its own.
    current requirements with your broker before any automated live order flow, and route through
    their approved algo path.
 5. **If it goes live** — start at an amount you'd be fine losing entirely. Scale only on realized
-   out-of-sample track record, never on backtest confidence.
+   out-of-sample track record, never on backtest confidence. Even once automated, keep the
+   advisory report running independently as the audit trail of what the model intended.
 
 ---
 
@@ -407,7 +453,8 @@ The mechanism behind the requirement that it keeps learning on its own.
 | M3 | Self-supervised encoder pretrained (first GPU run) | OOS rank IC > 0.02, stable sign across folds |
 | M4 | Differentiable-Sharpe agent backtested | Beats all 5 baselines OOS after costs; survives 2× costs |
 | M5 | PPO fine-tune + continual-learning loop | Rolling 12m Sharpe stable across ≥3 walk-forward folds |
-| M6 | 3 months paper trading | Paper vs backtest divergence within tolerance |
+| M6 | Advisory mode: daily recommendation cards, scored | ≥60 scored recommendations with a real (even if modest) hit-rate edge over random |
+| M7 | 3 months paper trading | Paper vs backtest divergence within tolerance |
 
 **Kill criteria — stop and rethink rather than tune, if:** M3 fails after three genuine
 architecture attempts; or the agent cannot beat 12-1 momentum after costs; or Sharpe collapses
