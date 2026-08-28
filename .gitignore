@@ -1,0 +1,34 @@
+# data (large, regenerable from ingest scripts — never commit)
+data/raw/
+data/interim/
+data/curated/
+*.parquet
+*.csv.zip
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# experiment tracking / notebooks
+mlruns/
+mlartifacts/
+wandb/
+.ipynb_checkpoints/
+experiments/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# local Claude Code session state (not project source)
+.claude/
+
+# env
+.env

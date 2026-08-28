@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market_neural_net"
+version = "0.1.0"
+description = "Self-learning neural trading agent for Indian equities"
+requires-python = ">=3.10"
+
+# Deliberately no [project.dependencies] pin here — use requirements.txt for
+# the actual environment (local CPU box, Colab, and friend's GPU all install
+# from the same requirements.txt so behavior stays identical across machines).
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
