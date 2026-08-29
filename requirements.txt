@@ -14,6 +14,7 @@ tqdm>=4.66
 # --- ml (installed already on this box; pin loosely) ---
 torch>=2.2
 scikit-learn>=1.3
+scipy>=1.11
 
 # --- testing / quality ---
 pytest>=8.0

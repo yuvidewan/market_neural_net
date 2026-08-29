@@ -291,9 +291,23 @@ Three encoders, in order, each a drop-in replacement behind one interface:
   policy exists to fix. v0's job (prove the harness works, beat the shuffled-label null) is
   done; making the signal itself better is v1/v2/Phase 5's job, not v0's.
 
-**v1 — Dilated causal TCN**
-- 8 blocks, dilations 1…128, 64 channels, receptive field ~256 bars.
-- Trains far faster than the LSTM, handles long context better. Still CPU-viable.
+**v1 — Dilated causal TCN — ✅ built and tested, M3 in progress**
+- 8 blocks, dilations 1…128, kernel_size=2, 64 channels → receptive field exactly 256 bars
+  (1 + sum(dilations)), causal structurally (left-padding only; tested directly by perturbing
+  future timesteps and confirming past outputs are bit-for-bit unchanged).
+- **"Still CPU-viable" needs a caveat, per the M2 lesson**: per-sample it's dramatically
+  cheaper than the LSTM (convolutions parallelize across time; no sequential-recurrence
+  bottleneck), but at M3's real target scale (200 symbols × full history × 4 walk-forward
+  folds × 8 epochs) it's still GPU territory in practice — a single-epoch timing probe on 5
+  symbols took ~1 minute, which projects to hours at full scale. **M3's real run goes to
+  Colab from the outset** (`notebooks/colab_train.ipynb` §7) rather than repeating M2's
+  overnight CPU run. Local runs are for smoke-testing correctness only (confirmed working).
+- Self-supervised objective #2 (below) — quantile regression pinball loss — is implemented
+  and encoder-agnostic (`src/models/ssl/quantile.py`), tested on synthetic data with
+  hand-verified pinball-loss values and a real convergence check.
+- Cross-sectional rank IC (`src/eval/metrics.py`) — the actual M3 gate metric — implemented
+  and tested: grouped by date (not pooled across dates, which would confound the signal with
+  day-level market moves), skips days with too few names for a meaningful correlation.
 
 **v2 — Two-axis causal Transformer (the main model, trains on GPU)**
 - Patchify: 16 consecutive bars → one token (PatchTST-style). 512 tokens ≈ long context.
@@ -464,7 +478,7 @@ looking at what it suggests and deciding whether you'd have taken the trade.
 |---|---|---|
 | M1 | Curated daily dataset, full universe, survivorship-clean | Data-quality report green; lookahead tests pass |
 | M2 | ✅ LSTM baseline trains; walk-forward harness runs end to end | Shuffled-label test gives Sharpe ≈ 0 — passing |
-| M3 | Self-supervised encoder pretrained (first GPU run) | OOS rank IC > 0.02, stable sign across folds |
+| M3 | Self-supervised encoder pretrained (first GPU run) — code done, real run pending Colab | OOS rank IC > 0.02, stable sign across folds |
 | M4 | Differentiable-Sharpe agent backtested | Beats all 5 baselines OOS after costs; survives 2× costs |
 | M5 | PPO fine-tune + continual-learning loop | Rolling 12m Sharpe stable across ≥3 walk-forward folds |
 | M6 | Advisory mode: daily recommendation cards, scored | ≥60 scored recommendations with a real (even if modest) hit-rate edge over random |
