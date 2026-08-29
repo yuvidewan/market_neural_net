@@ -325,14 +325,46 @@ Three encoders, in order, each a drop-in replacement behind one interface:
     TCN's convolutions parallelizing across time (vs. the LSTM's sequential recurrence) plus
     actual GPU compute is roughly a 65x+ wall-clock improvement for comparable-scale work.
 
-**v2 — Two-axis causal Transformer (the main model, trains on GPU)**
-- Patchify: 16 consecutive bars → one token (PatchTST-style). 512 tokens ≈ long context.
+**v2 — Two-axis causal Transformer (the main model, trains on GPU) — ✅ built and tested locally, real run pending Colab**
+- Patchify: 16 consecutive bars → one token (PatchTST-style), left-padded on the past side if
+  seq_len isn't a clean multiple (same convention as the TCN's causal padding).
 - Alternating blocks: **temporal attention** (causal, RoPE, within one symbol) and
-  **cross-sectional attention** (across all symbols at a fixed timestamp, unmasked).
+  **cross-sectional attention** (across all symbols at a fixed patch position, unmasked).
   The cross-sectional axis is where sector rotation, lead-lag, and index effects get learned
   without anyone telling it what a sector is.
 - d_model 256, 8 heads, 8 blocks ≈ 15–25M params. Small by LLM standards, right-sized for the
   data volume.
+- **Scope decision on context length**: the spec's "512 tokens ≈ long context" implies ~8,192
+  bars of history (16-bar patches × 512), which almost no name in this universe has (28 years
+  ≈ 7,000 sessions at the very most). The real run below uses `seq_len=120` — same as v0/v1,
+  for a clean apples-to-apples comparison — which patches down to **8 tokens**, not 512.
+  Genuinely long-context patching is future work once there's a reason to believe more history
+  helps (worth revisiting once v2's IC is measured against v1's at matched context length).
+- **A real architectural difference from v0/v1, not just a bigger model**: the LSTM/TCN process
+  one symbol's window in total isolation (cross-sectional information only enters at
+  *evaluation* time, when rank IC groups already-independent predictions by date after the
+  fact). The transformer's cross-sectional attention needs every symbol as of the same date in
+  one forward pass, so it needed its own dataset (`src/data/panel_dataset.py`,
+  `PanelSequenceDataset`) that returns whole cross-sectional panels rather than independent
+  (symbol, date) windows. `eval/walkforward.py`'s fold-splitting/leakage-guard functions work
+  on it completely unchanged (duck-typed on `.samples[i].label_date`), which was the point of
+  building them that way in M2.
+- **Causality is tested across the full multi-block stack, not one block in isolation**:
+  perturbing the last patch of one symbol's input must leave every earlier patch's output
+  bit-for-bit unchanged, for every symbol — verified directly, because a residual/reshape bug
+  in the symbol↔patch transpose could leak information one block at a time in a way a
+  single-block test wouldn't catch. A second test confirms the cross-sectional axis actually
+  does mix symbols (perturbing symbol A measurably changes symbol B's same-patch output) —
+  proving it's a real information-sharing axis, not an accidental no-op.
+- **Not yet built from the original Phase 3 spec**: masked bar modeling and the auxiliary
+  volatility head (objectives #1 and #3 below) — only #2 (quantile regression) has been
+  implemented and used so far, for both the TCN and the transformer. Revisit once there's a
+  reason to believe the extra objectives would move the needle past what #2 alone gets.
+- **Runs go to Colab from the outset**, same lesson as M2/M3 — panel-based training takes one
+  optimizer step per calendar date rather than per fixed-size batch of independent samples
+  (necessarily, since a panel's size varies day to day), meaning meaningfully *more* steps per
+  epoch than the TCN run for a comparable number of samples. Untested how that nets out in
+  wall-clock time; find out on the GPU, not by guessing on CPU.
 
 **Self-supervised objectives (the "learns whatever it can" stage)**
 
