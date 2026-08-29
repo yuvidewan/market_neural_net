@@ -272,10 +272,24 @@ full-series `StandardScaler`. This single mistake is the #1 source of fake backt
 
 Three encoders, in order, each a drop-in replacement behind one interface:
 
-**v0 — LSTM baseline (must exist, must be beaten)**
+**v0 — LSTM baseline (must exist, must be beaten) — ✅ built, trained, M2 complete**
 - 2-layer LSTM, hidden 128, sequence 120 daily bars, per symbol.
-- Purpose: sanity floor + fast local CPU iteration. If a transformer can't beat this, the
-  transformer is broken.
+- Purpose: sanity floor. **Correction to an earlier assumption in this doc**: this is
+  *not* fast local CPU iteration at real scale — 40 symbols × full 1998–2026 history × 4
+  expanding walk-forward folds × 6 epochs took **6.5 hours on CPU** (see below). LSTMs are
+  sequential over the time dimension, so there's no shortcut; use Colab for anything beyond a
+  tiny smoke-test config once real folds/epochs are involved.
+- **Real result (4 walk-forward folds, 2022–2025, 40 liquid ISINs, 10bps flat cost)**:
+  gross Sharpe 0.47–0.56 and hit rate ~51% in every fold — consistently signed and
+  consistently *slightly* above the shuffled-label null across 4 independent OOS years, which
+  is a real if weak signal, not noise (the shuffled-label test already confirms this pipeline
+  reports ~0 when there's nothing there). But **net Sharpe collapses to 0.12 overall**
+  (one fold goes to ~0.00) once even a flat 10bps cost is applied, because the naive
+  sign-of-prediction policy churns 45–73% of the book per day. That turnover collapse is the
+  expected failure mode of the "just sign(prediction)" policy used here as a floor check —
+  not a signal problem to fix in v0, but exactly what Phase 5's cost-aware, turnover-penalized
+  policy exists to fix. v0's job (prove the harness works, beat the shuffled-label null) is
+  done; making the signal itself better is v1/v2/Phase 5's job, not v0's.
 
 **v1 — Dilated causal TCN**
 - 8 blocks, dilations 1…128, 64 channels, receptive field ~256 bars.
@@ -449,7 +463,7 @@ looking at what it suggests and deciding whether you'd have taken the trade.
 | # | Milestone | Gate to pass before proceeding |
 |---|---|---|
 | M1 | Curated daily dataset, full universe, survivorship-clean | Data-quality report green; lookahead tests pass |
-| M2 | LSTM baseline trains; walk-forward harness runs end to end | Shuffled-label test gives Sharpe ≈ 0 |
+| M2 | ✅ LSTM baseline trains; walk-forward harness runs end to end | Shuffled-label test gives Sharpe ≈ 0 — passing |
 | M3 | Self-supervised encoder pretrained (first GPU run) | OOS rank IC > 0.02, stable sign across folds |
 | M4 | Differentiable-Sharpe agent backtested | Beats all 5 baselines OOS after costs; survives 2× costs |
 | M5 | PPO fine-tune + continual-learning loop | Rolling 12m Sharpe stable across ≥3 walk-forward folds |
