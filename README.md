@@ -98,10 +98,16 @@ it from day one rather than retrofitting later.
 1. **Device-agnostic code.** One `DEVICE = torch.device("cuda" if torch.cuda.is_available()
    else "cpu")` in a single place. Never hardcode `.cuda()`. Every script must run on CPU with
    a tiny config for smoke-testing before it's shipped to the GPU.
-2. **Checkpoint every N steps to durable storage, and always resume from checkpoint.** Colab
-   disconnects — a run that can't resume is a run you'll lose. Save `{model, optimizer,
-   scheduler, step, rng_state, config_hash}`. Target: killing the process at any moment costs
-   at most 10 minutes of work.
+2. **Checkpoint to durable storage, and always resume from checkpoint. — ✅ implemented**
+   (`src/train/checkpointing.py`, `FoldCheckpointer`). Granularity is per-epoch, per-fold (not
+   mid-epoch — losing the epochs in progress on whichever fold was running is an accepted
+   tradeoff against the complexity of also persisting dataloader/shuffle state). Every real-run
+   cell in `notebooks/colab_train.ipynb` writes `--out-dir` straight to mounted Drive, so this
+   protects against a full Colab VM disconnect, not just a script-level crash — re-running the
+   same command picks up from the last completed epoch and skips any already-finished fold.
+   Verified against the actual failure mode, not just unit tests: killed a real training
+   process mid-epoch (`kill -9`) and confirmed the re-run resumed from the correct epoch and
+   reproduced the same result as an uninterrupted run.
 3. **Ship data, not notebooks.** The curated parquet is the interface between machines. Daily
    Tier A is under 1 GB — put it in Google Drive and `drive.mount()` it, or upload to a GCS/S3
    bucket / HuggingFace dataset repo. Minute Tier B (15–30 GB) is too big for repeated Colab
@@ -364,7 +370,9 @@ Three encoders, in order, each a drop-in replacement behind one interface:
   optimizer step per calendar date rather than per fixed-size batch of independent samples
   (necessarily, since a panel's size varies day to day), meaning meaningfully *more* steps per
   epoch than the TCN run for a comparable number of samples. Untested how that nets out in
-  wall-clock time; find out on the GPU, not by guessing on CPU.
+  wall-clock time; find out on the GPU, not by guessing on CPU. If it does turn out to run long,
+  that risk is now bounded rather than open-ended: checkpoint/resume (above) means a Colab
+  disconnect costs at most the epochs in progress, not the whole run.
 
 **Self-supervised objectives (the "learns whatever it can" stage)**
 

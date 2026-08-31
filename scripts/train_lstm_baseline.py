@@ -10,6 +10,13 @@ point-in-time universe (a name liquid today might not have been liquid in
 running quickly. Phase 5's real backtest must reselect the universe
 point-in-time per fold; tracked as follow-up, not silently assumed fixed.
 
+Checkpoint/resume (per-epoch, per-fold -- see src/train/checkpointing.py):
+safe to Ctrl-C or lose a Colab session mid-run and just re-run the exact same
+command with the same --out-dir; already-completed folds are skipped, and an
+interrupted fold resumes from its last saved epoch, not from scratch. Pass
+--fresh to ignore any existing checkpoint and start over (e.g. after a real
+architecture change makes the old one incompatible).
+
 Usage:
     python -m scripts.train_lstm_baseline
     python -m scripts.train_lstm_baseline --n-symbols 40 --epochs 8
@@ -34,6 +41,7 @@ from src.data.universe import liquid_universe_from_prices
 from src.eval.metrics import sign_backtest
 from src.eval.walkforward import Fold, assert_no_leakage, generate_yearly_folds, split_masks
 from src.models.encoders.lstm import LSTMBaseline
+from src.train.checkpointing import FoldCheckpointer
 
 
 def scan_curated_prices(curated_dir: Path) -> pl.LazyFrame:
@@ -60,12 +68,20 @@ def select_liquid_universe(lazy_prices: pl.LazyFrame, n_symbols: int, lookback_d
     return top["isin"].to_list(), as_of
 
 
-def train_one_fold(train_ds, model, epochs, batch_size, lr, device):
+def train_one_fold(train_ds, model, epochs, batch_size, lr, device, checkpointer, fold_label):
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.MSELoss()
+
+    start_epoch = checkpointer.resume_epoch_for(fold_label)
+    if start_epoch > 0:
+        if checkpointer.load_model_state(fold_label, model, opt, device):
+            print(f"    resumed from checkpoint at epoch {start_epoch}", flush=True)
+        else:
+            start_epoch = 0
+
     loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     model.train()
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         total_loss, n_batches = 0.0, 0
         for xb, yb in loader:
             xb, yb = xb.to(device), yb.to(device)
@@ -76,7 +92,8 @@ def train_one_fold(train_ds, model, epochs, batch_size, lr, device):
             opt.step()
             total_loss += loss.item()
             n_batches += 1
-        print(f"    epoch {epoch + 1}/{epochs}  train_mse={total_loss / max(n_batches, 1):.6f}")
+        print(f"    epoch {epoch + 1}/{epochs}  train_mse={total_loss / max(n_batches, 1):.6f}", flush=True)
+        checkpointer.save_epoch(fold_label, epoch + 1, model, opt)
 
 
 def evaluate_fold(test_ds, model, batch_size, device):
@@ -105,14 +122,16 @@ def main():
     ap.add_argument("--test-years", type=int, nargs="+", default=[2022, 2023, 2024, 2025])
     ap.add_argument("--out-dir", type=Path, default=Path("experiments/lstm_baseline"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--fresh", action="store_true", help="ignore any existing checkpoint in --out-dir and start over")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device: {device}")
+    print(f"device: {device}", flush=True)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    checkpointer = FoldCheckpointer(args.out_dir, run_args=vars(args), fresh=args.fresh)
 
     print("Scanning curated prices (lazy) ...", flush=True)
     lazy_prices = scan_curated_prices(args.curated_dir)
@@ -124,25 +143,33 @@ def main():
     print(f"  {subset.height} rows in liquid subset, "
           f"date range {subset['date'].min()} -> {subset['date'].max()}", flush=True)
 
-    print("Computing causal features ...")
+    print("Computing causal features ...", flush=True)
     features = compute_features(subset)
 
-    print(f"Building sequence dataset (seq_len={args.seq_len}) ...")
+    print(f"Building sequence dataset (seq_len={args.seq_len}) ...", flush=True)
     ds = SequenceDataset(features, seq_len=args.seq_len)
-    print(f"  {len(ds)} valid windows")
+    print(f"  {len(ds)} valid windows", flush=True)
 
     folds = generate_yearly_folds(args.test_years)
+    completed_by_label = {r["fold"]: r for r in checkpointer.completed_results()}
     all_results = []
     all_net_pnl = []
 
     for fold in folds:
+        if fold.label in completed_by_label:
+            saved = completed_by_label[fold.label]
+            print(f"\n=== Fold {fold.label}: already completed (from checkpoint), skipping ===", flush=True)
+            all_net_pnl.append(np.array(saved["net_pnl"]))
+            all_results.append({k: v for k, v in saved.items() if k != "net_pnl"})
+            continue
+
         print(f"\n=== Fold {fold.label}: test [{fold.test_start} .. {fold.test_end}] "
-              f"(embargo {args.embargo_days}d) ===")
+              f"(embargo {args.embargo_days}d) ===", flush=True)
         train_mask, test_mask = split_masks(ds, fold, embargo_days=args.embargo_days)
         n_train, n_test = train_mask.sum(), test_mask.sum()
-        print(f"  train samples: {n_train}   test samples: {n_test}")
+        print(f"  train samples: {n_train}   test samples: {n_test}", flush=True)
         if n_train < 200 or n_test < 20:
-            print("  skipping fold (insufficient samples)")
+            print("  skipping fold (insufficient samples)", flush=True)
             continue
 
         train_ds = ds.subset_by_mask(train_mask)
@@ -155,21 +182,26 @@ def main():
             num_layers=args.num_layers,
         ).to(device)
 
-        train_one_fold(train_ds, model, args.epochs, args.batch_size, args.lr, device)
+        train_one_fold(train_ds, model, args.epochs, args.batch_size, args.lr, device, checkpointer, fold.label)
         preds, actuals = evaluate_fold(test_ds, model, args.batch_size, device)
         result = sign_backtest(preds, actuals, cost_bps=10.0)
-        all_net_pnl.append(result.pop("net_pnl"))
 
         print(f"  gross_sharpe={result['gross_sharpe']:.3f}  net_sharpe={result['net_sharpe']:.3f}  "
-              f"hit_rate={result['hit_rate']:.3f}  avg_turnover/day={result['avg_turnover_per_day']:.3f}")
+              f"hit_rate={result['hit_rate']:.3f}  avg_turnover/day={result['avg_turnover_per_day']:.3f}", flush=True)
+
+        full_result = {"fold": fold.label, **result}
+        full_result["net_pnl"] = result["net_pnl"].tolist()  # kept for resume, stripped from the final report below
+        checkpointer.mark_fold_complete(fold.label, full_result)
+
+        all_net_pnl.append(result.pop("net_pnl"))
         all_results.append({"fold": fold.label, **result})
 
     if all_net_pnl:
         combined = np.concatenate(all_net_pnl)
         overall_sharpe = float(np.sqrt(252) * combined.mean() / (combined.std(ddof=1) + 1e-12))
-        print(f"\n=== Overall (all folds concatenated) ===")
+        print(f"\n=== Overall (all folds concatenated) ===", flush=True)
         print(f"  n_days={len(combined)}  net_sharpe={overall_sharpe:.3f}  "
-              f"mean_daily_ret={combined.mean():.6f}")
+              f"mean_daily_ret={combined.mean():.6f}", flush=True)
 
         report = {
             "universe_size": len(universe),
@@ -184,9 +216,9 @@ def main():
             "generated_at": dt.datetime.now().isoformat(),
         }
         (args.out_dir / "report.json").write_text(json.dumps(report, indent=2))
-        print(f"\nReport written to {args.out_dir / 'report.json'}")
+        print(f"\nReport written to {args.out_dir / 'report.json'}", flush=True)
     else:
-        print("\nNo folds produced results.")
+        print("\nNo folds produced results.", flush=True)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,14 @@ batch_size=128 used elsewhere in this repo, so this isn't a noisier gradient
 signal than the LSTM/TCN scripts get -- just organized around dates instead
 of independent samples.
 
+Checkpoint/resume (per-epoch, per-fold -- see src/train/checkpointing.py):
+this script does far more optimizer steps per epoch than the batch-based
+scripts (one per calendar date rather than one per fixed-size batch), so
+it's the one most likely to actually need this. Safe to Ctrl-C or lose a
+Colab session mid-run and re-run the exact same command with the same
+--out-dir; already-completed folds are skipped, interrupted folds resume
+from their last saved epoch. Pass --fresh to start over.
+
 Usage:
     python -u -m scripts.train_transformer_ssl
     python -u -m scripts.train_transformer_ssl --n-symbols 200 --epochs 8
@@ -43,15 +51,24 @@ from src.eval.metrics import rank_ic_summary, sign_backtest
 from src.eval.walkforward import assert_no_leakage, generate_yearly_folds, split_masks
 from src.models.encoders.transformer import TwoAxisTransformerEncoder
 from src.models.ssl.quantile import EncoderQuantileWrapper, QUANTILES, pinball_loss
+from src.train.checkpointing import FoldCheckpointer
 from scripts.train_lstm_baseline import scan_curated_prices, select_liquid_universe
 
 
-def train_one_fold(train_ds, model, epochs, lr, device, seed):
+def train_one_fold(train_ds, model, epochs, lr, device, seed, checkpointer, fold_label):
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     rng = np.random.default_rng(seed)
+
+    start_epoch = checkpointer.resume_epoch_for(fold_label)
+    if start_epoch > 0:
+        if checkpointer.load_model_state(fold_label, model, opt, device):
+            print(f"    resumed from checkpoint at epoch {start_epoch}", flush=True)
+        else:
+            start_epoch = 0
+
     model.train()
     n = len(train_ds)
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         order = rng.permutation(n)
         total_loss, n_steps = 0.0, 0
         for i in order:
@@ -65,6 +82,7 @@ def train_one_fold(train_ds, model, epochs, lr, device, seed):
             total_loss += loss.item()
             n_steps += 1
         print(f"    epoch {epoch + 1}/{epochs}  train_pinball={total_loss / max(n_steps, 1):.6f}", flush=True)
+        checkpointer.save_epoch(fold_label, epoch + 1, model, opt)
 
 
 def evaluate_fold(test_ds, model, device):
@@ -100,6 +118,7 @@ def main():
     ap.add_argument("--test-years", type=int, nargs="+", default=[2022, 2023, 2024, 2025])
     ap.add_argument("--out-dir", type=Path, default=Path("experiments/ssl_quantile_transformer"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--fresh", action="store_true", help="ignore any existing checkpoint in --out-dir and start over")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -108,6 +127,7 @@ def main():
     print(f"device: {device}", flush=True)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    checkpointer = FoldCheckpointer(args.out_dir, run_args=vars(args), fresh=args.fresh)
 
     print("Scanning curated prices (lazy) ...", flush=True)
     lazy_prices = scan_curated_prices(args.curated_dir)
@@ -127,10 +147,16 @@ def main():
     print(f"  {len(ds)} valid panel-dates", flush=True)
 
     folds = generate_yearly_folds(args.test_years)
+    completed_by_label = {r["fold"]: r for r in checkpointer.completed_results()}
     all_results = []
     median_idx = QUANTILES.index(0.5)
 
     for fold in folds:
+        if fold.label in completed_by_label:
+            print(f"\n=== Fold {fold.label}: already completed (from checkpoint), skipping ===", flush=True)
+            all_results.append(completed_by_label[fold.label])
+            continue
+
         print(f"\n=== Fold {fold.label}: test [{fold.test_start} .. {fold.test_end}] "
               f"(embargo {args.embargo_days}d) ===", flush=True)
         train_mask, test_mask = split_masks(ds, fold, embargo_days=args.embargo_days)
@@ -150,7 +176,7 @@ def main():
         )
         model = EncoderQuantileWrapper(encoder, hidden_size=args.d_model).to(device)
 
-        train_one_fold(train_ds, model, args.epochs, args.lr, device, args.seed)
+        train_one_fold(train_ds, model, args.epochs, args.lr, device, args.seed, checkpointer, fold.label)
         preds, actuals, dates = evaluate_fold(test_ds, model, device)
         if len(actuals) == 0:
             print("  no test predictions produced, skipping fold metrics", flush=True)
@@ -166,7 +192,9 @@ def main():
         print(f"  [sign-backtest, comparable to M2/M3] gross_sharpe={bt['gross_sharpe']:.3f}  "
               f"net_sharpe={bt['net_sharpe']:.3f}  hit_rate={bt['hit_rate']:.3f}", flush=True)
 
-        all_results.append({"fold": fold.label, "rank_ic": ic, "sign_backtest": bt})
+        fold_result = {"fold": fold.label, "rank_ic": ic, "sign_backtest": bt}
+        checkpointer.mark_fold_complete(fold.label, fold_result)
+        all_results.append(fold_result)
 
     if all_results:
         mean_ics = [r["rank_ic"]["mean_ic"] for r in all_results if not np.isnan(r["rank_ic"]["mean_ic"])]
