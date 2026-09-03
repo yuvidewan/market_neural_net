@@ -76,14 +76,34 @@ def train_one_fold(train_ds, model, epochs, lr, device, seed, checkpointer, fold
     n = len(train_ds)
     for epoch in range(start_epoch, epochs):
         order = rng.permutation(n)
+        # LR warmup over the first 10% of steps of epoch 0 ONLY (0.05x -> 1.0x lr):
+        # each step here is one full cross-sectional panel, not a small mini-batch,
+        # so gradient variance step-to-step is high, and this is a fairly deep
+        # (8-block, 8-head) attention stack with randomly-initialized attention
+        # weights -- exactly the combination that collapses to a constant
+        # prediction without warmup (confirmed: the first real run did this,
+        # every fold's rank IC came back NaN/0-days, sign_backtest turnover
+        # ~1000x lower than the TCN's, hit rate ~50% -- the signature of a model
+        # that gave up and started predicting the same value regardless of input).
+        # A resumed run skips epoch 0's warmup as already-done, which is correct.
+        warmup_steps = max(1, n // 10) if epoch == 0 else 0
         total_loss, n_steps = 0.0, 0
-        for i in order:
+        for step_in_epoch, i in enumerate(order):
+            if step_in_epoch < warmup_steps:
+                warmup_lr = lr * (0.05 + 0.95 * (step_in_epoch + 1) / warmup_steps)
+                for g in opt.param_groups:
+                    g["lr"] = warmup_lr
+            elif epoch == 0 and step_in_epoch == warmup_steps:
+                for g in opt.param_groups:
+                    g["lr"] = lr  # warmup done, lock in the target LR for the rest of training
+
             xb, yb = train_ds[i]
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
             pred = model(xb)
             loss = pinball_loss(pred, yb, model.head.quantiles)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
             total_loss += loss.item()
             n_steps += 1
@@ -118,7 +138,7 @@ def main():
     ap.add_argument("--n-blocks", type=int, default=8)
     ap.add_argument("--patch-size", type=int, default=16)
     ap.add_argument("--epochs", type=int, default=6)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--lr", type=float, default=3e-4)  # lower than M2/M3's 1e-3 -- see train_one_fold's warmup comment
     ap.add_argument("--min-symbols-per-date", type=int, default=5)
     ap.add_argument("--embargo-days", type=int, default=10)
     ap.add_argument("--test-years", type=int, nargs="+", default=[2022, 2023, 2024, 2025])
@@ -197,6 +217,17 @@ def main():
         bt = sign_backtest(median_pred, actuals, cost_bps=10.0)
         bt.pop("net_pnl")
 
+        if ic["n_days"] == 0:
+            # rank_ic_by_date skips a date if predictions have zero variance
+            # across symbols that day. Zero valid days across an entire fold
+            # means EVERY date's predictions were constant -- almost always a
+            # collapsed model (predicting the same value regardless of input),
+            # not a data problem. Printed live so this is caught during the
+            # run, not discovered later by downloading and reading report.json.
+            pred_std = float(np.std(median_pred))
+            print(f"  WARNING: 0 valid rank-IC days -- predictions likely collapsed to "
+                  f"near-constant (overall pred std={pred_std:.6g}, "
+                  f"lr/warmup/grad-clip may need adjusting)", flush=True)
         print(f"  mean_ic={ic['mean_ic']:.4f}  ic_ir={ic['ic_ir']:.3f}  "
               f"pct_positive_days={ic['pct_positive_days']:.2f}  n_days={ic['n_days']}", flush=True)
         print(f"  [sign-backtest, comparable to M2/M3] gross_sharpe={bt['gross_sharpe']:.3f}  "

@@ -379,10 +379,25 @@ Three encoders, in order, each a drop-in replacement behind one interface:
 - **Runs go to Colab from the outset**, same lesson as M2/M3 — panel-based training takes one
   optimizer step per calendar date rather than per fixed-size batch of independent samples
   (necessarily, since a panel's size varies day to day), meaning meaningfully *more* steps per
-  epoch than the TCN run for a comparable number of samples. Untested how that nets out in
-  wall-clock time; find out on the GPU, not by guessing on CPU. If it does turn out to run long,
-  that risk is now bounded rather than open-ended: checkpoint/resume (above) means a Colab
-  disconnect costs at most the epochs in progress, not the whole run.
+  epoch than the TCN run for a comparable number of samples. That risk is now bounded rather
+  than open-ended: checkpoint/resume (above) means a Colab disconnect costs at most the epochs
+  in progress, not the whole run.
+- **First full-scale real run (200 symbols) collapsed — diagnosed and fixed, re-run pending.**
+  Every fold came back with rank IC exactly `NaN`/`0 valid days`, sign-backtest turnover
+  ~1000x lower than the TCN's (~0.00003/day vs. ~0.9/day), and hit rate pinned at ~50% — the
+  specific signature of a model that stopped using its input and settled on predicting close
+  to the same value regardless of symbol or date (rank IC skips a day entirely when
+  predictions have zero cross-sectional variance that day; zero valid days across a whole fold
+  means *every* day looked like that). Root cause: no LR warmup, no gradient clipping, and a
+  flat `1e-3` learning rate on a fairly deep (8-block, 8-head) freshly-initialized attention
+  stack, trained one cross-sectional panel per optimizer step — high step-to-step gradient
+  variance with an unwarmed-up, unclipped update is a well-known way to collapse a transformer
+  early in training. Fixed in `scripts/train_transformer_ssl.py`: linear LR warmup over the
+  first 10% of epoch 0's steps, gradient clipping (max-norm 1.0), and a more conservative
+  default LR (`3e-4`, down from `1e-3`). A smoke-test-scale re-run after the fix produces real
+  per-day IC values again (not `0 days`) with a normally-decreasing loss curve; the full
+  200-symbol run needs re-running on Colab to get a trustworthy v2 gate result — the numbers
+  above in this section are from *before* the fix and are not a real read on the architecture.
 
 **Self-supervised objectives (the "learns whatever it can" stage)**
 
