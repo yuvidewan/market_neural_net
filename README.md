@@ -98,16 +98,26 @@ it from day one rather than retrofitting later.
 1. **Device-agnostic code.** One `DEVICE = torch.device("cuda" if torch.cuda.is_available()
    else "cpu")` in a single place. Never hardcode `.cuda()`. Every script must run on CPU with
    a tiny config for smoke-testing before it's shipped to the GPU.
-2. **Checkpoint to durable storage, and always resume from checkpoint. — ✅ implemented**
-   (`src/train/checkpointing.py`, `FoldCheckpointer`). Granularity is per-epoch, per-fold (not
-   mid-epoch — losing the epochs in progress on whichever fold was running is an accepted
-   tradeoff against the complexity of also persisting dataloader/shuffle state). Every real-run
-   cell in `notebooks/colab_train.ipynb` writes `--out-dir` straight to mounted Drive, so this
-   protects against a full Colab VM disconnect, not just a script-level crash — re-running the
-   same command picks up from the last completed epoch and skips any already-finished fold.
-   Verified against the actual failure mode, not just unit tests: killed a real training
-   process mid-epoch (`kill -9`) and confirmed the re-run resumed from the correct epoch and
-   reproduced the same result as an uninterrupted run.
+2. **Checkpoint to durable storage, and always resume from checkpoint. — ✅ implemented,
+   corrected once already.** (`src/train/checkpointing.py`, `FoldCheckpointer`.) Granularity is
+   per-epoch, per-fold (not mid-epoch — losing the epochs in progress on whichever fold was
+   running is an accepted tradeoff against the complexity of also persisting
+   dataloader/shuffle state).
+   **The first version wrote `--out-dir` straight to a Drive-mounted path and made things
+   worse, not better**: Drive's FUSE mount doesn't handle interrupted writes reliably, so a
+   checkpoint write cut off by a disconnect could corrupt the resume state file itself —
+   crashing the *next* resume attempt too, i.e. exactly the data loss checkpointing exists to
+   prevent. Fixed design: `--out-dir` is **local VM disk** (fast, always reliable within a
+   session), `--mirror-dir` is Drive as a **best-effort backup** (every write there is wrapped
+   so a Drive hiccup prints a warning and moves on, never crashes training). If local disk gets
+   wiped by a full VM recycle, the next run auto-hydrates from whatever the mirror last caught
+   up to. Every state read is also now defensive — a corrupted state file is treated as "no
+   prior state" (warned, not crashed).
+   Verified against the actual failure modes, not just unit tests: killed a real training
+   process mid-epoch (`kill -9`) on all three scripts and confirmed resume picked up from the
+   correct epoch and reproduced the same result as an uninterrupted run; separately simulated a
+   full local-disk wipe with an active Drive mirror and confirmed hydration recovers it; and
+   fed it deliberately truncated JSON to confirm it recovers instead of crashing.
 3. **Ship data, not notebooks.** The curated parquet is the interface between machines. Daily
    Tier A is under 1 GB — put it in Google Drive and `drive.mount()` it, or upload to a GCS/S3
    bucket / HuggingFace dataset repo. Minute Tier B (15–30 GB) is too big for repeated Colab

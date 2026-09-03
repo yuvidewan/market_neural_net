@@ -22,6 +22,12 @@ command with the same --out-dir; already-completed folds are skipped, and an
 interrupted fold resumes from its last saved epoch. Pass --fresh to ignore
 any existing checkpoint and start over.
 
+IMPORTANT for Colab: keep --out-dir on LOCAL disk and pass --mirror-dir
+pointing at your mounted Drive instead of putting --out-dir on Drive
+directly -- Drive's FUSE mount doesn't handle interrupted writes reliably
+enough to be the primary read/write target; local-first + best-effort
+mirror survives a full VM recycle without that risk (see checkpointing.py).
+
 Usage:
     python -u -m scripts.train_ssl_quantile
     python -u -m scripts.train_ssl_quantile --n-symbols 40 --epochs 6
@@ -106,6 +112,10 @@ def main():
     ap.add_argument("--out-dir", type=Path, default=Path("experiments/ssl_quantile_tcn"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fresh", action="store_true", help="ignore any existing checkpoint in --out-dir and start over")
+    ap.add_argument("--mirror-dir", type=Path, default=None,
+                     help="best-effort backup copy of checkpoints (e.g. a Drive-mounted path in Colab) -- "
+                          "--out-dir itself should stay LOCAL disk for speed/reliability; a Drive hiccup "
+                          "here only skips that mirror write, it never crashes training")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -114,7 +124,7 @@ def main():
     print(f"device: {device}", flush=True)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    checkpointer = FoldCheckpointer(args.out_dir, run_args=vars(args), fresh=args.fresh)
+    checkpointer = FoldCheckpointer(args.out_dir, run_args=vars(args), fresh=args.fresh, mirror_dir=args.mirror_dir)
 
     print("Scanning curated prices (lazy) ...", flush=True)
     lazy_prices = scan_curated_prices(args.curated_dir)

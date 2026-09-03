@@ -17,6 +17,16 @@ interrupted fold resumes from its last saved epoch, not from scratch. Pass
 --fresh to ignore any existing checkpoint and start over (e.g. after a real
 architecture change makes the old one incompatible).
 
+IMPORTANT for Colab: keep --out-dir on LOCAL disk (the default, e.g.
+experiments/...) and pass --mirror-dir pointing at your mounted Drive
+instead of putting --out-dir on Drive directly. An earlier version of this
+had --out-dir write straight to Drive, which turned out to cause the exact
+data loss it was meant to prevent -- Drive's FUSE mount doesn't handle
+interrupted writes reliably, and a checkpoint write cut off by a disconnect
+could corrupt the resume state itself. Local-first + best-effort mirror
+avoids that while still surviving a full VM recycle (mirror gets hydrated
+back to a fresh local out-dir automatically).
+
 Usage:
     python -m scripts.train_lstm_baseline
     python -m scripts.train_lstm_baseline --n-symbols 40 --epochs 8
@@ -123,6 +133,10 @@ def main():
     ap.add_argument("--out-dir", type=Path, default=Path("experiments/lstm_baseline"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fresh", action="store_true", help="ignore any existing checkpoint in --out-dir and start over")
+    ap.add_argument("--mirror-dir", type=Path, default=None,
+                     help="best-effort backup copy of checkpoints (e.g. a Drive-mounted path in Colab) -- "
+                          "--out-dir itself should stay LOCAL disk for speed/reliability; a Drive hiccup "
+                          "here only skips that mirror write, it never crashes training")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -131,7 +145,7 @@ def main():
     print(f"device: {device}", flush=True)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    checkpointer = FoldCheckpointer(args.out_dir, run_args=vars(args), fresh=args.fresh)
+    checkpointer = FoldCheckpointer(args.out_dir, run_args=vars(args), fresh=args.fresh, mirror_dir=args.mirror_dir)
 
     print("Scanning curated prices (lazy) ...", flush=True)
     lazy_prices = scan_curated_prices(args.curated_dir)
